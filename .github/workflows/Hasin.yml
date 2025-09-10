@@ -1,0 +1,63 @@
+name: Windows Server 2025 with VPN and 32GB RAM, 562GB Storage
+
+on:
+  workflow_dispatch:
+
+jobs:
+  create_windows_droplet:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Install doctl and jq
+        run: |
+          sudo snap install doctl
+          sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Authenticate doctl
+        run: doctl auth init -t ${{ secrets.DIGITALOCEAN_TOKEN }}
+
+      - name: Create Droplet Windows Server 2025
+        id: create_droplet
+        run: |
+          droplet_info=$(doctl compute droplet create "windows-server-2025-vpn" \
+            --region nyc3 --size c-8 --image windows-2022-dc-core-aws \
+            --wait --format ID,PublicIPv4 --no-header --ssh-keys ${{ secrets.DIGITALOCEAN_SSH_KEY_ID }} \
+            --json)
+          echo "$droplet_info"
+          droplet_id=$(echo "$droplet_info" | jq -r '.[0].ID')
+          droplet_ip=$(echo "$droplet_info" | jq -r '.[0].PublicIPv4')
+          echo "::set-output name=droplet_id::$droplet_id"
+          echo "::set-output name=droplet_ip::$droplet_ip"
+
+      - name: Create and attach 562GB volume
+        run: |
+          volume_info=$(doctl compute volume create "win-vol-562gb" --region nyc3 --size 562GiB --json)
+          volume_id=$(echo "$volume_info" | jq -r '.[0].ID')
+          doctl compute volume-action attach $volume_id ${{ steps.create_droplet.outputs.droplet_id }} --region nyc3
+          echo "Volume $volume_id attached to droplet"
+
+      - name: Wait for SSH and RDP
+        run: |
+          ip=${{ steps.create_droplet.outputs.droplet_ip }}
+          for i in {1..30}; do
+            timeout 5 bash -c "echo > /dev/tcp/$ip/22" && break || timeout 5 bash -c "echo > /dev/tcp/$ip/3389" && break || sleep 10
+          done
+
+      - name: Setup Tailscale VPN on Windows VM
+        run: |
+          ip=${{ steps.create_droplet.outputs.droplet_ip }}
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa administrator@$ip << EOF
+            Invoke-WebRequest -Uri https://tailscale.com/install.ps1 -OutFile install.ps1
+            powershell -ExecutionPolicy Bypass -File install.ps1
+            tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --accept-routes
+            restart-computer -Force
+          EOF
+
+      - name: Show connection info
+        run: |
+          echo "Windows Server 2025 created with 32GB RAM, 562GB Storage attached"
+          echo "IP Address: ${{ steps.create_droplet.outputs.droplet_ip }}"
+          echo "Use RDP with Administrator user and password configured in DigitalOcean panel"
+          echo "Tailscale VPN running"
+          
