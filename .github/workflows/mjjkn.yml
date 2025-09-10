@@ -1,0 +1,61 @@
+name: Create DigitalOcean Droplet with password auth, 32GB RAM, 562GB volume and Tailscale VPN
+
+on:
+  workflow_dispatch:
+
+jobs:
+  create_droplet:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Install doctl and jq
+        run: |
+          sudo snap install doctl
+          sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Authenticate doctl using API token
+        run: doctl auth init --access-token ${{ secrets.DIGITALOCEAN_TOKEN }}
+
+      - name: Create Droplet without SSH key (password login)
+        id: create_droplet
+        run: |
+          droplet=$(doctl compute droplet create "password-auth-droplet" \
+            --region nyc3 --size s-8vcpu-32gb --image ubuntu-22-04-x64 \
+            --wait --format ID,PublicIPv4,Password --no-header --json)
+          droplet_id=$(echo $droplet | jq -r '.[0].ID')
+          droplet_ip=$(echo $droplet | jq -r '.[0].PublicIPv4')
+          droplet_password=$(echo $droplet | jq -r '.[0].Password')
+          echo "::set-output name=id::$droplet_id"
+          echo "::set-output name=ip::$droplet_ip"
+          echo "Droplet password: $droplet_password"
+
+      - name: Create and attach 562GB block volume
+        run: |
+          volume=$(doctl compute volume create "vpn-volume-562gb" --region nyc3 --size 562GiB --json)
+          volume_id=$(echo $volume | jq -r '.[0].ID')
+          doctl compute volume-action attach $volume_id ${{ steps.create_droplet.outputs.id }} --region nyc3
+          echo "Volume $volume_id attached"
+
+      - name: Wait for SSH to be ready
+        run: |
+          ip=${{ steps.create_droplet.outputs.ip }}
+          for i in {1..20}; do
+            timeout 5 bash -c "echo > /dev/tcp/$ip/22" && break || sleep 10
+          done
+
+      - name: Install and run Tailscale VPN on Droplet
+        run: |
+          ip=${{ steps.create_droplet.outputs.ip }}
+          sshpass -p ${{ steps.create_droplet.outputs.password }} ssh -o StrictHostKeyChecking=no root@$ip << EOF
+            curl -fsSL https://tailscale.com/install.sh | sh
+            tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --accept-routes
+            nohup sudo shutdown -h +360 &
+          EOF
+
+      - name: Show Droplet info with password
+        run: |
+          echo "Droplet IP: ${{ steps.create_droplet.outputs.ip }}"
+          echo "Droplet password: ${{ steps.create_droplet.outputs.password }}"
+          echo "32GB RAM, 562GB extra storage, Tailscale VPN running, machine shuts down in 6 hours."
+          
