@@ -1,0 +1,33 @@
+name: Windows Server 2025 RDP with Tailscale VPN - 9x Storage Steps
+
+on:
+  workflow_dispatch:
+
+jobs:
+  setup_rdp:
+    runs-on: windows-2025
+    timeout-minutes: 360
+
+    strategy:
+      matrix:
+        run-index: [1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+    steps:
+      - name: Checkout repository (optional)
+        uses: actions/checkout@v3
+
+      - name: Connect to Tailscale using Auth Key
+        uses: tailscale/github-action@v3
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+
+      - name: Run storage utilizing step #${{ matrix.run-index }}
+        shell: powershell
+        run: |
+          Write-Host "Running storage usage step iteration: ${{ matrix.run-index }}"
+          # Exemplu: creați un fișier temporar de câțiva GB pentru a ocupa spațiu
+          $filePath = "C:\\temp_file_${{ matrix.run-index }}.bin"
+          $sizeMB = 1500  # circa 1.5 GB per fișier
+          fsutil file createnew $filePath ($sizeMB * 1MB)
+          Write-Host "Created file $filePath of size ${sizeMB}MB"
+          
