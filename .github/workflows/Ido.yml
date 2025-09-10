@@ -1,0 +1,57 @@
+name: Windows Server 2025 RDP with Fixed User and Password
+
+on:
+  workflow_dispatch:
+
+jobs:
+  setup_rdp:
+    runs-on: windows-2025
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Connect to Tailscale using Auth Key
+        uses: tailscale/github-action@v3
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+
+      - name: Enable RDP, configure firewall and disable UAC prompts
+        shell: powershell
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0
+          Enable-NetFirewallRule -DisplayGroup 'Remote Desktop'
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'UserAuthentication' -Value 1
+          Set-Service -Name TermService -StartupType Automatic
+          Start-Service -Name TermService
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "ConsentPromptBehaviorAdmin" -Value 0
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "EnableLUA" -Value 0
+
+      - name: Create local admin user vpnuser with fixed password
+        id: create_user
+        shell: powershell
+        run: |
+          $userExists = Get-LocalUser -Name "vpnuser" -ErrorAction SilentlyContinue
+          $fixedPassword = "FixedPassword123!"
+          if (-not $userExists) {
+            $securePass = ConvertTo-SecureString $fixedPassword -AsPlainText -Force
+            New-LocalUser -Name "vpnuser" -Password $securePass -FullName "VPN User" -Description "Fixed admin user for RDP"
+            Add-LocalGroupMember -Group "Administrators" -Member "vpnuser"
+          }
+          echo "rdp_password=$fixedPassword" >> $env:GITHUB_OUTPUT
+
+      - name: Show Tailscale IP and RDP credentials
+        shell: powershell
+        run: |
+          $tailscaleIp = tailscale ip -4
+          Write-Host "======================================"
+          Write-Host "Tailscale VPN IP for RDP: $tailscaleIp"
+          Write-Host "Username: vpnuser"
+          Write-Host "Password: ${{ steps.create_user.outputs.rdp_password }}"
+          Write-Host "======================================"
+
+      - name: Keep session alive to allow RDP connections
+        shell: powershell
+        run: Start-Sleep -Seconds 21600
+        
