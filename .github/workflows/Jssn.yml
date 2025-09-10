@@ -1,0 +1,68 @@
+name: DigitalOcean Droplet with auto SSH key and Tailscale VPN
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
+      TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+
+    steps:
+      - name: Generate SSH key pair
+        id: sshkey
+        run: |
+          ssh-keygen -t rsa -b 4096 -m PEM -f id_rsa -N ""
+          ssh_pub_key=$(cat id_rsa.pub)
+          echo "ssh_pub_key<<EOF" >> $GITHUB_ENV
+          echo "$ssh_pub_key" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Install doctl and jq
+        run: |
+          sudo snap install doctl
+          sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Authenticate doctl
+        run: doctl auth init --access-token $DIGITALOCEAN_TOKEN
+
+      - name: Add generated SSH key to DigitalOcean
+        id: addkey
+        run: |
+          keyname="auto-generated-$(date +%s)"
+          keyid=$(doctl compute ssh-key create $keyname --public-key "$ssh_pub_key" --format ID --no-header)
+          echo "::set-output name=keyid::$keyid"
+
+      - name: Create DigitalOcean Droplet with generated SSH key
+        id: createdroplet
+        run: |
+          droplet_info=$(doctl compute droplet create "vm-with-tailscale" \
+            --region nyc3 --size s-8vcpu-32gb --image ubuntu-22-04-x64 \
+            --ssh-keys ${{ steps.addkey.outputs.keyid }} --wait --format ID,PublicIPv4 --no-header --json)
+          droplet_id=$(echo $droplet_info | jq -r '.[0].ID')
+          droplet_ip=$(echo $droplet_info | jq -r '.[0].PublicIPv4')
+          echo "::set-output name=id::$droplet_id"
+          echo "::set-output name=ip::$droplet_ip"
+
+      - name: Wait for SSH to be available
+        run: |
+          ip=${{ steps.createdroplet.outputs.ip }}
+          for i in {1..20}; do
+            timeout 5 bash -c "echo > /dev/tcp/$ip/22" && break || sleep 10
+          done
+
+      - name: Install Tailscale VPN on Droplet
+        run: |
+          ip=${{ steps.createdroplet.outputs.ip }}
+          ssh -o StrictHostKeyChecking=no -i ./id_rsa root@$ip << EOF
+            curl -fsSL https://tailscale.com/install.sh | sh
+            tailscale up --authkey=$TAILSCALE_AUTHKEY --accept-routes
+            nohup sudo shutdown -h +360 &
+          EOF
+
+      - name: Cleanup SSH key from DigitalOcean (optional)
+        run: |
+          doctl compute ssh-key delete ${{ steps.addkey.outputs.keyid }} --force
+          
