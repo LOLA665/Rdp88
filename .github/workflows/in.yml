@@ -1,0 +1,56 @@
+name: Windows Server 2025 RDP with Tailscale VPN & Admin
+
+on:
+  workflow_dispatch:
+
+jobs:
+  setup_rdp:
+    runs-on: windows-2025
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Connect to Tailscale using Auth Key
+        uses: tailscale/github-action@v3
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+
+      - name: Enable RDP and firewall
+        shell: powershell
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0
+          Enable-NetFirewallRule -DisplayGroup 'Remote Desktop'
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'UserAuthentication' -Value 1
+          Set-Service -Name TermService -StartupType Automatic
+          Start-Service -Name TermService
+
+      - name: Create local admin user if not exists
+        id: gen_pass
+        shell: powershell
+        run: |
+          $userExists = Get-LocalUser -Name "runneradmin" -ErrorAction SilentlyContinue
+          if (-not $userExists) {
+            $chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+            $password = -join ((1..16) | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
+            $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+            New-LocalUser -Name "runneradmin" -Password $securePass -FullName "Runner Admin" -Description "User for RDP"
+            Add-LocalGroupMember -Group "Administrators" -Member "runneradmin"
+            echo "rdp_password=$password" >> $env:GITHUB_OUTPUT
+          } else {
+            echo "rdp_password=EXISTING_PASSWORD" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Show Tailscale IP and RDP credentials
+        shell: powershell
+        run: |
+          $tailscaleIp = tailscale ip -4
+          Write-Host "Tailscale VPN IP for RDP: $tailscaleIp"
+          Write-Host "Username: runneradmin"
+          Write-Host "Password: ${{ steps.gen_pass.outputs.rdp_password }}"
+
+      - name: Keep session alive for 6 hours
+        shell: powershell
+        run: Start-Sleep -Seconds 21600
+        
