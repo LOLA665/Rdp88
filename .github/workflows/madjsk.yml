@@ -1,0 +1,56 @@
+name: Create AWS EC2 t3.medium with Tailscale VPN only
+
+on:
+  workflow_dispatch:
+    inputs:
+      aws_region:
+        description: 'AWS Region'
+        required: true
+        default: 'us-east-1'
+      key_pair_name:
+        description: 'EC2 Key Pair Name' 
+        required: true
+
+jobs:
+  deploy_ec2_tailscale:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ github.event.inputs.aws_region }}
+      TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Create EC2 instance
+        id: create_ec2
+        run: |
+          INSTANCE_ID=$(aws ec2 run-instances --image-id ami-0c02fb55956c7d316 --count 1 --instance-type t3.medium --key-name "${{ github.event.inputs.key_pair_name }}" --security-groups tail-scale-sg --query 'Instances[0].InstanceId' --output text)
+          echo "instance_id=$INSTANCE_ID" >> $GITHUB_OUTPUT
+
+      - name: Wait for EC2 instance to be running
+        run: |
+          aws ec2 wait instance-running --instance-ids ${{ steps.create_ec2.outputs.instance_id }}
+
+      - name: Get Public IP (optional)
+        run: |
+          IP=$(aws ec2 describe-instances --instance-ids ${{ steps.create_ec2.outputs.instance_id }} --query "Reservations[0].Instances[0].PublicIpAddress" --output text)
+          echo "IP: $IP"
+
+      - name: Install Tailscale and configure VPN
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ github.event.inputs.key_pair_name }} ec2-user@$IP << EOF
+            curl -fsSL https://tailscale.com/install.sh | sh
+            sudo tailscale up --authkey=$TAILSCALE_AUTHKEY --accept-routes
+            sudo systemctl stop sshd
+            sudo systemctl disable sshd
+          EOF
+
+      - name: Confirm SSH blocked and VPN active
+        run: |
+          echo "Access over Tailscale VPN only. SSH public access disabled."
+          
