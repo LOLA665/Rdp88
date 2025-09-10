@@ -1,0 +1,63 @@
+name: Windows Server 2025 RDP with Tailscale VPN & Admin Rights
+
+on:
+  workflow_dispatch:
+
+jobs:
+  setup_rdp:
+    runs-on: windows-2025
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout repository (opțional)
+        uses: actions/checkout@v3
+
+      - name: Connect to Tailscale using Auth Key
+        uses: tailscale/github-action@v3
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+
+      - name: Enable Remote Desktop and optimize system
+        shell: powershell
+        run: |
+          # Permitere conexiune RDP și configurare firewall
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0
+          Enable-NetFirewallRule -DisplayGroup 'Remote Desktop'
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'UserAuthentication' -Value 1
+          Set-Service -Name TermService -StartupType Automatic
+          Start-Service -Name TermService
+
+          # Dezactivare prompturi UAC pentru administratori
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "ConsentPromptBehaviorAdmin" -Value 0
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "EnableLUA" -Value 0
+
+      - name: Create local admin user if not exists
+        id: gen_pass
+        shell: powershell
+        run: |
+          $userExists = Get-LocalUser -Name "runneradmin" -ErrorAction SilentlyContinue
+          if (-not $userExists) {
+            $chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+            $passwordPlain = -join ((1..16) | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
+            $password = ConvertTo-SecureString $passwordPlain -AsPlainText -Force
+            New-LocalUser -Name "runneradmin" -Password $password -FullName "Runner Admin" -Description "User RDP Admin"
+            Add-LocalGroupMember -Group "Administrators" -Member "runneradmin"
+            echo "rdp_password=$passwordPlain" >> $env:GITHUB_OUTPUT
+          } else {
+            echo "rdp_password=ExistingPassword" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Show Tailscale IP and RDP credentials
+        shell: powershell
+        run: |
+          $tailscaleIp = tailscale ip -4
+          Write-Host "======================================"
+          Write-Host "Tailscale VPN IP for RDP: $tailscaleIp"
+          Write-Host "Username: runneradmin"
+          Write-Host "Password: ${{ steps.gen_pass.outputs.rdp_password }}"
+          Write-Host "======================================"
+
+      - name: Keep the runner session alive for 6 hours
+        shell: powershell
+        run: Start-Sleep -Seconds 21600
+        
